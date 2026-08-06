@@ -199,23 +199,29 @@ final class AnalyzingJavaCompiler private[sbt] (
       }
 
       // Read the API information from [[Class]] to analyze dependencies.
-      def readAPI(source: VirtualFileRef, classes: Seq[Class[?]]): Set[(String, String)] = {
-        val (apis, mainClasses, inherits) = ClassToAPI.process(classes, log)
+      // Build each class's API from its already-parsed classfile rather than by loading it.
+      // `resolve` reaches supertypes outside this batch (JavaAnalyze memoizes it over the
+      // classpath, reading bytes, never defining a class) so `structure.inherited` stays as
+      // complete as `Class.getMethods` made it — without that, a supertype change in another
+      // project would not move this class's hash and its dependents would go stale.
+      def readAPI(
+          source: VirtualFileRef,
+          named: Seq[(String, ClassFile)],
+          resolve: String => Option[ClassFile]
+      ): Set[(String, String)] = {
+        val (apis, mainClasses) = ClassfileToAPI.process(named, resolve, log)
         apis.foreach(callback.api(source, _))
         mainClasses.foreach(callback.mainClass(source, _))
-        inherits.map {
-          case (from, to) => (from.getName, to.getName)
-        }
+        named.iterator.flatMap {
+          case (_, cf) =>
+            (cf.superClassName +: cf.interfaceNames.toIndexedSeq)
+              .filter(_.nonEmpty)
+              .map(cf.className -> _)
+        }.toSet
       }
 
       // Read the API of classes that couldn't be reflectively loaded, from their classfiles
       // (sbt/zinc#837), so name-hashing still tracks changes to their own public shape.
-      def readClassfileAPI(source: VirtualFileRef, classFiles: Seq[(String, ClassFile)]): Unit = {
-        val (apis, mainClasses) = ClassfileToAPI.process(classFiles, log)
-        apis.foreach(callback.api(source, _))
-        mainClasses.foreach(callback.mainClass(source, _))
-      }
-
       // Record progress for java analysis
       val javaAnalysisPhase = "Java analysis"
       progressOpt.map { progress =>
@@ -239,7 +245,6 @@ final class AnalyzingJavaCompiler private[sbt] (
               callback,
               loader,
               readAPI,
-              readClassfileAPI,
               constantDeps
             )
           } finally classes.close()
