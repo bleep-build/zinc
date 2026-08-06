@@ -32,10 +32,15 @@ import sbt.util.Logger
  * the result slots into the same analysis. Member types are erased (from JVM descriptors), but
  * generic signatures, checked exceptions, and declared annotations are folded in conservatively (raw
  * `Signature` string / `throws` and annotation *type* names — not annotation element values), so a
- * change to any of them still changes the hash. Enum children, type parameters, and inherited
- * members are not modelled — see the "Phase 2" scope in docs/design/classfile-based-java-api.md. The
- * output need not match the reflection-derived API byte-for-byte; it only needs to be deterministic
- * and to change when the class's public shape changes.
+ * change to any of them still changes the hash. Enum children and type parameters are not modelled —
+ * see the "Phase 2" scope in docs/design/classfile-based-java-api.md. The output need not match the
+ * reflection-derived API byte-for-byte; it only needs to be deterministic and to change when the
+ * class's public shape changes.
+ *
+ * Inherited members ARE modelled, via [[inheritedDefinitions]] and the caller-supplied [[Resolve]].
+ * Without them a subclass whose supertype changed keeps its old hash — its own classfile is
+ * unchanged — and its dependents are never invalidated, which is a stale build rather than a slow
+ * one.
  */
 object ClassfileToAPI:
   import api.DefinitionType.{ ClassDef, Module, Trait }
@@ -111,16 +116,109 @@ object ClassfileToAPI:
    */
   def process(
       named: Seq[(String, ClassFile)],
+      resolve: Resolve,
       log: Logger = Logger.Null
   ): (Seq[api.ClassLike], Seq[String]) =
     val classApis = ArrayBuffer.empty[api.ClassLike]
     val mainClasses = ArrayBuffer.empty[String]
+    // One memo for the whole batch. Without it every subclass re-walks and re-converts its entire
+    // supertype chain, which on a deep hierarchy costs more than the reflection this replaces.
+    val memo = new java.util.HashMap[String, Members]
     for (name, cf) <- named do
-      classApis ++= classLikes(name, cf)
+      classApis ++= classLikes(name, cf, resolve, memo)
       if cf.methods.exists(_.isMain) then mainClasses += name
     (classApis.toSeq, mainClasses.toSeq)
 
-  private def classLikes(name: String, cf: ClassFile): Seq[api.ClassLike] =
+  /**
+   * Looks up a supertype's classfile by binary name. Returning None is normal and safe — see
+   * [[inheritedDefinitions]].
+   */
+  type Resolve = String => Option[ClassFile]
+
+  /**
+   * A resolver that knows only the batch being processed. Supertypes outside it — the JDK, other
+   * projects — go unresolved.
+   */
+  def resolveWithin(named: Seq[(String, ClassFile)]): Resolve =
+    val byBinaryName = named.iterator.map { case (_, cf) => cf.className -> cf }.toMap
+    byBinaryName.get(_)
+
+  /**
+   * Members this class inherits, as (static, instance) — the `structure.inherited` that reflection
+   * gets for free from `Class.getMethods`/`getFields`.
+   *
+   * This exists for hash sensitivity, not for a faithful member list. `HashAPI.hashStructure0`
+   * hashes `declared` AND `inherited`, so without it a change to a supertype in another project
+   * leaves the subclass's hash unmoved and the subclass's dependents are never invalidated.
+   *
+   * Deliberately conservative in three ways, all erring toward over-sensitivity (a wasted recompile)
+   * rather than under (a stale build):
+   *   - unresolvable supertypes are skipped rather than failing. The JDK is the common case, and it
+   *     does not change within a build.
+   *   - inherited members are not de-duplicated against the subclass's own declarations, so an
+   *     override moves the hash.
+   *   - private members are excluded, as are constructors; Java inherits neither.
+   */
+  private type Members = (Array[api.ClassDefinition], Array[api.ClassDefinition])
+
+  private def inheritedDefinitions(
+      cf: ClassFile,
+      resolve: Resolve,
+      memo: java.util.HashMap[String, Members]
+  ): (Array[api.ClassDefinition], Array[api.ClassDefinition]) =
+    val statics = ArrayBuffer.empty[api.ClassDefinition]
+    val instances = ArrayBuffer.empty[api.ClassDefinition]
+    val seen = scala.collection.mutable.HashSet.empty[String]
+
+    /**
+     * This type's own members, converted once and reused by every subclass in the batch. Ordered by
+     * declaration, which is fixed by the classfile — so callers can concatenate without re-sorting.
+     */
+    def ownMembers(parent: ClassFile): Members =
+      val cached = memo.get(parent.className)
+      if cached != null then cached
+      else
+        val st = ArrayBuffer.empty[api.ClassDefinition]
+        val inst = ArrayBuffer.empty[api.ClassDefinition]
+        val pkg = ClassToAPI.packageAndName(parent.className)._1
+        for f <- parent.fields if !Modifier.isPrivate(f.accessFlags) do
+          val (isStatic, d) = fieldDef(parent, f, pkg)
+          if isStatic then st += d else inst += d
+        for m <- parent.methods if !Modifier.isPrivate(m.accessFlags) do
+          val n = m.name.getOrElse("")
+          if !n.contains("<init>") && !n.contains("<clinit>") then
+            val (isStatic, d) = methodDef(parent, m, parent.className, pkg)
+            if isStatic then st += d else inst += d
+        val result: Members = (st.toArray, inst.toArray)
+        memo.put(parent.className, result)
+        result
+
+    // Depth-first, superclass before interfaces, `seen` de-duplicating: a fixed order derived from
+    // the classfile alone. That is what makes the plain concatenation below deterministic — sorting
+    // per subclass instead would re-walk every inherited member of every class, which on a 96k-class
+    // project costs more than the reflection this replaces.
+    def walk(binaryName: String): Unit =
+      if binaryName.nonEmpty && seen.add(binaryName) then
+        resolve(binaryName).foreach { parent =>
+          val (st, inst) = ownMembers(parent)
+          statics ++= st
+          instances ++= inst
+          (parent.superClassName +: parent.interfaceNames.toIndexedSeq).foreach(walk)
+        }
+
+    // A class does not inherit from itself; seeding `seen` also stops a cyclic classpath looping.
+    seen += cf.className
+    (cf.superClassName +: cf.interfaceNames.toIndexedSeq).foreach(walk)
+
+    (statics.toArray, instances.toArray)
+  end inheritedDefinitions
+
+  private def classLikes(
+      name: String,
+      cf: ClassFile,
+      resolve: Resolve,
+      memo: java.util.HashMap[String, Members]
+  ): Seq[api.ClassLike] =
     // Use the binary name's package (last '.' before the simple/binary name); the canonical name's
     // dots would mis-split nested classes (e.g. "pkg.Outer.Inner").
     val enclPkg = ClassToAPI.packageAndName(cf.className)._1
@@ -153,10 +251,12 @@ object ClassfileToAPI:
       "annotations" -> annotationTypeNames(cf, cf.attributes.toIndexedSeq)
     )
 
+    val (staticInherited, instanceInherited) = inheritedDefinitions(cf, resolve, memo)
+
     val instanceStructure =
-      api.Structure.of(strict(parents), strict(instanceDeclared), strict(noDefinitions))
+      api.Structure.of(strict(parents), strict(instanceDeclared), strict(instanceInherited))
     val staticStructure =
-      api.Structure.of(strict(noTypes), strict(staticDeclared), strict(noDefinitions))
+      api.Structure.of(strict(noTypes), strict(staticDeclared), strict(staticInherited))
 
     val cls = api.ClassLike.of(
       name,

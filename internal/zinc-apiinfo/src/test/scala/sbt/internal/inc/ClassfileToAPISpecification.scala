@@ -14,7 +14,7 @@ package internal
 package inc
 
 import java.io.File
-import sbt.internal.inc.classfile.{ JavaCompilerForUnitTesting, Parser }
+import sbt.internal.inc.classfile.{ ClassFile, JavaCompilerForUnitTesting, Parser }
 import sbt.io.IO
 import sbt.util.Logger
 import xsbt.api.HashAPI
@@ -35,7 +35,7 @@ class ClassfileToAPISpecification extends UnitSpec:
         IO.write(src, source)
         JavaCompilerForUnitTesting.compileJava(Seq(src), dir, Seq.empty)
         val cf = Parser(new File(dir, "Sample.class").toPath, Logger.Null)
-        val (apis, _) = ClassfileToAPI.process(Seq("Sample" -> cf))
+        val (apis, _) = processAlone(Seq("Sample" -> cf))
         apis.find(_.definitionType == DefinitionType.ClassDef).get
 
       val intGreet = "public class Sample { public int greet(int n) { return 0; } }"
@@ -83,8 +83,8 @@ class ClassfileToAPISpecification extends UnitSpec:
       val callback = JavaCompilerForUnitTesting.analyze(
         classesDir,
         Seq(outerFile),
-        (cb, src, named) =>
-          val (apis, _) = ClassfileToAPI.process(named)
+        (cb, src, named, resolve) =>
+          val (apis, _) = ClassfileToAPI.process(named, resolve)
           apis.foreach(cb.api(src, _))
       )
 
@@ -115,7 +115,7 @@ class ClassfileToAPISpecification extends UnitSpec:
       )
       JavaCompilerForUnitTesting.compileJava(Seq(src), temp, Seq.empty)
       val cf = Parser(new File(temp, "S.class").toPath, Logger.Null)
-      val (apis, _) = ClassfileToAPI.process(Seq("S" -> cf))
+      val (apis, _) = processAlone(Seq("S" -> cf))
       val cls = apis.find(_.definitionType == DefinitionType.ClassDef).get
       val mod = apis.find(_.definitionType == DefinitionType.Module).get
       def names(c: ClassLike): Set[String] = c.structure.declared.map(_.name).toSet
@@ -205,7 +205,7 @@ class ClassfileToAPISpecification extends UnitSpec:
         IO.write(src, source)
         JavaCompilerForUnitTesting.compileJava(Seq(src), dir, Seq.empty)
         val cf = Parser(new File(dir, "Sample.class").toPath, Logger.Null)
-        ClassfileToAPI.process(Seq("Sample" -> cf))._2
+        processAlone(Seq("Sample" -> cf))._2
       // same descriptor as main but a different name -> not a main class
       assert(mainsOf("a", "public class Sample { public static void foo(String[] a) {} }").isEmpty)
       assert(mainsOf("b", "public class Sample { public static void main(String[] a) {} }") == Seq(
@@ -221,7 +221,11 @@ class ClassfileToAPISpecification extends UnitSpec:
     IO.write(src, source)
     JavaCompilerForUnitTesting.compileJava(Seq(src), dir, Seq.empty)
     val cf = Parser(new File(dir, "Sample.class").toPath, Logger.Null)
-    ClassfileToAPI.process(Seq("Sample" -> cf))._1
+    processAlone(Seq("Sample" -> cf))._1
 
   private def hashAll(apis: Seq[ClassLike]): Int = apis.map(HashAPI(_)).sum
+
+  /** The API of a batch whose supertypes outside it stay unresolved, as for a lone class. */
+  private def processAlone(named: Seq[(String, ClassFile)]): (Seq[ClassLike], Seq[String]) =
+    ClassfileToAPI.process(named, ClassfileToAPI.resolveWithin(named))
 end ClassfileToAPISpecification
