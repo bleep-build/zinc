@@ -196,6 +196,35 @@ class ClassfileToAPISpecification extends UnitSpec:
     }
   }
 
+  // javac records a sealed type's permitted subclasses only in its PermittedSubclasses attribute,
+  // which changes no member, yet they decide which switches over the type are exhaustive and which
+  // classes may extend it.
+  it should "detect changes to a sealed type's permitted subclasses" in {
+    IO.withTemporaryDirectory { temp =>
+      val xy = "final class X implements Sample {} final class Y implements Sample {}"
+      val sealedXY = sampleApis(temp, "a", s"public sealed interface Sample { $xy }")
+      val sealedXYZ = sampleApis(
+        temp,
+        "b",
+        s"public sealed interface Sample { $xy final class Z implements Sample {} }"
+      )
+      val open = sampleApis(temp, "c", s"public interface Sample { $xy }")
+      val openAgain = sampleApis(temp, "d", s"public interface Sample { $xy }")
+
+      def sampleTrait(apis: Seq[ClassLike]): ClassLike =
+        apis.find(_.definitionType == DefinitionType.Trait).get
+      assert(sampleTrait(sealedXY).modifiers.isSealed)
+      assert(!sampleTrait(open).modifiers.isSealed)
+      assert(
+        sampleTrait(sealedXY).childrenOfSealedClass.toSeq.map(_.toString).sorted ==
+          Seq("Sample$X", "Sample$Y").map(n => ClassToAPI.reference(n).toString)
+      )
+      assert(hashAll(sealedXY) != hashAll(sealedXYZ), "adding a permitted subclass")
+      assert(hashAll(sealedXY) != hashAll(open), "unsealing")
+      assert(hashAll(open) == hashAll(openAgain))
+    }
+  }
+
   // P3: only a method actually named `main` (not just any public-static-void(String[])) is a main.
   it should "treat only a method named main as a main class" in {
     IO.withTemporaryDirectory { temp =>

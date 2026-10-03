@@ -32,10 +32,11 @@ import sbt.util.Logger
  * the result slots into the same analysis. Member types are erased (from JVM descriptors), but
  * generic signatures, checked exceptions, and declared annotations are folded in conservatively (raw
  * `Signature` string / `throws` and annotation *type* names — not annotation element values), so a
- * change to any of them still changes the hash. Enum children and type parameters are not modelled —
- * see the "Phase 2" scope in docs/design/classfile-based-java-api.md. The output need not match the
- * reflection-derived API byte-for-byte; it only needs to be deterministic and to change when the
- * class's public shape changes.
+ * change to any of them still changes the hash. A sealed class's permitted subclasses are its
+ * children. Enum children and type parameters are not modelled — see the "Phase 2" scope in
+ * docs/design/classfile-based-java-api.md. The output need not match the reflection-derived API
+ * byte-for-byte; it only needs to be deterministic and to change when the class's public shape
+ * changes.
  *
  * Inherited members ARE modelled, via [[inheritedDefinitions]] and the caller-supplied [[Resolve]].
  * Without them a subclass whose supertype changed keeps its old hash — its own classfile is
@@ -82,6 +83,27 @@ object ClassfileToAPI:
             cf.constantPool(classConstant.nameIndex).value.fold("")(_.toString).replace('/', '.')
           }
         catch case _: Throwable => Nil
+
+  /**
+   * The binary names in a sealed class's `PermittedSubclasses` attribute (JVMS 4.7.31), empty for a
+   * class that is not sealed. javac writes the attribute whether the subclasses are listed in a
+   * `permits` clause or inferred from the compilation unit.
+   */
+  private def permittedSubclassNames(cf: ClassFile): Seq[String] =
+    cf.attributes.find(_.isNamed("PermittedSubclasses")) match
+      case None    => Nil
+      case Some(a) =>
+        val in = new DataInputStream(new ByteArrayInputStream(a.value))
+        val count = in.readUnsignedShort()
+        List.fill(count) {
+          val classConstant = cf.constantPool(in.readUnsignedShort())
+          cf.constantPool(classConstant.nameIndex).value match
+            case Some(name) => name.toString.replace('/', '.')
+            case None       =>
+              throw new IllegalStateException(
+                s"${cf.className}: PermittedSubclasses entry $classConstant names no class"
+              )
+        }
 
   /** Declared annotation type names from RuntimeVisible/Invisible annotations (JVMS 4.7.16). */
   private def annotationTypeNames(cf: ClassFile, attrs: Seq[AttributeInfo]): Seq[String] =
@@ -230,7 +252,12 @@ object ClassfileToAPI:
     // Use the binary name's package (last '.' before the simple/binary name); the canonical name's
     // dots would mis-split nested classes (e.g. "pkg.Outer.Inner").
     val enclPkg = ClassToAPI.packageAndName(cf.className)._1
-    val mods = ClassToAPI.modifiers(cf.accessFlags)
+    // A sealed class's permitted subclasses decide which `switch`es over it are exhaustive and which
+    // classes may extend it, so they are its children, as an enum's constants are in ClassToAPI.
+    // HashAPI hashes children, so adding, removing or unsealing a subclass changes the hash.
+    val permitted = permittedSubclassNames(cf)
+    val children: Array[api.Type] = permitted.map(ClassToAPI.reference).toArray
+    val mods = classModifiers(cf.accessFlags, permitted.nonEmpty)
     val acc = ClassToAPI.access(cf.accessFlags, enclPkg)
     val isInterface = Modifier.isInterface(cf.accessFlags)
     val tpe = if isInterface then Trait else ClassDef
@@ -275,7 +302,7 @@ object ClassfileToAPI:
       strict(ClassToAPI.Empty),
       strict(instanceStructure),
       noStrings,
-      noTypes,
+      children,
       topLevel,
       noTypeParameters
     )
@@ -294,6 +321,23 @@ object ClassfileToAPI:
     )
     cls :: stat :: Nil
   end classLikes
+
+  /**
+   * [[ClassToAPI.modifiers]] plus `sealed`, which no JVM access flag carries. With
+   * `useOptimizedSealed`, NameHashing gives children only to classes marked sealed, so without the
+   * flag a Scala dependent matching on a sealed Java type would not see its children change.
+   */
+  private def classModifiers(accessFlags: Int, isSealed: Boolean): api.Modifiers =
+    new api.Modifiers(
+      Modifier.isAbstract(accessFlags),
+      false,
+      Modifier.isFinal(accessFlags),
+      isSealed,
+      false,
+      false,
+      false,
+      false
+    )
 
   /** (isStatic, FieldLike) for a classfile field. */
   private def fieldDef(

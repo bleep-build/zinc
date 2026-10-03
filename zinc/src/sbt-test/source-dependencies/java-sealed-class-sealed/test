@@ -1,0 +1,10 @@
+# `use` extends dep's open class P. Sealing P (permits Q) makes that illegal, and changes no member
+# of P, only adds its PermittedSubclasses attribute.
+> use/compile
+$ sleep 2000
+$ copy-file changes/P.java dep/src/main/java/P.java
+$ copy-file changes/Q.java dep/src/main/java/Q.java
+-> use/compile
+> use/clean
+> dep/clean
+-> use/compile

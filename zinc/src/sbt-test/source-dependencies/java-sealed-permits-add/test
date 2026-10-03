@@ -1,0 +1,12 @@
+# `use` switches exhaustively over dep's sealed interface S (permits X, Y), with no default.
+# Adding Z to the permits list changes no member of S, only its PermittedSubclasses attribute, yet
+# makes the switch non-exhaustive. The change must reach S's API hash, or `use` is not recompiled
+# and the build stays green when it should fail. Cross-module, so the external-API path is checked.
+> use/compile
+$ sleep 2000
+$ copy-file changes/S.java dep/src/main/java/S.java
+$ copy-file changes/Z.java dep/src/main/java/Z.java
+-> use/compile
+> use/clean
+> dep/clean
+-> use/compile

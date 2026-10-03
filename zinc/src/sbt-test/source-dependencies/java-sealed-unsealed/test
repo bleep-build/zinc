@@ -1,0 +1,9 @@
+# `use` switches exhaustively over dep's sealed interface S, with no default. Unsealing S changes
+# no member, only drops the PermittedSubclasses attribute, yet makes the switch non-exhaustive.
+> use/compile
+$ sleep 2000
+$ copy-file changes/S.java dep/src/main/java/S.java
+-> use/compile
+> use/clean
+> dep/clean
+-> use/compile
