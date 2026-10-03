@@ -1225,7 +1225,10 @@ private final class AnalysisCallback(
 
   private def addProductsAndDeps(base: Analysis, extraHashes: ExtraHashes): Analysis =
     import scala.jdk.CollectionConverters.*
-    srcs.asScala.foldLeft(base) {
+    // Dependencies are between classes, not sources, so they are added for all sources at once.
+    val internalDeps = mutable.ArrayBuffer.empty[InternalDependency]
+    val externalDeps = mutable.ArrayBuffer.empty[ExternalDependency]
+    val withSources = srcs.asScala.foldLeft(base) {
       case (a, src) =>
         val stamp = stampReader.source(src)
         val classesInSrc = classNames
@@ -1258,12 +1261,10 @@ private final class AnalysisCallback(
             NonLocalProduct(srcClassName, binaryClassName, classFile, classFileStamp)
         }
 
-        val internalDeps = classesInSrc.flatMap(cls =>
-          intSrcDeps.getOrElse(cls, ConcurrentHashMap.newKeySet[InternalDependency]()).asScala
-        )
-        val externalDeps = classesInSrc.flatMap(cls =>
-          extSrcDeps.getOrElse(cls, ConcurrentHashMap.newKeySet[ExternalDependency]()).asScala
-        )
+        classesInSrc.foreach { cls =>
+          intSrcDeps.get(cls).foreach(internalDeps ++= _.asScala)
+          extSrcDeps.get(cls).foreach(externalDeps ++= _.asScala)
+        }
         val libDeps = libraries.map(d => (d, binaryClassName(d), stampReader.library(d)))
 
         val bytecodeHash = computeBytecodeHash(localProds, nonLocalProds)
@@ -1276,11 +1277,12 @@ private final class AnalysisCallback(
           info,
           nonLocalProds,
           localProds,
-          internalDeps,
-          externalDeps,
+          Nil,
+          Nil,
           libDeps
         )
     }
+    withSources.addDependencies(internalDeps, externalDeps)
   end addProductsAndDeps
 
   def getSourceInfos: SourceInfos =

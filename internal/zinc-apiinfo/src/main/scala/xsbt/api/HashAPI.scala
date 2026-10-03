@@ -13,6 +13,7 @@ package xsbt.api
 
 import xsbti.api.*
 
+import scala.annotation.threadUnsafe
 import scala.util.hashing.MurmurHash3
 import HashAPI.Hash
 
@@ -75,8 +76,10 @@ final class HashAPI private (
   import scala.collection.mutable
   import MurmurHash3.{ mix, stringHash, unorderedHash }
 
-  private val visitedStructures = visitedMap[Structure]
-  private val visitedClassLike = visitedMap[ClassLike]
+  // Lazy: a hasher is made per name group by NameHashing, and most never meet a structure or a
+  // class, so they need not pay for two hash tables.
+  @threadUnsafe private lazy val visitedStructures = visitedMap[Structure]
+  @threadUnsafe private lazy val visitedClassLike = visitedMap[ClassLike]
   private def visitedMap[T] = new mutable.HashMap[T, List[Hash]]
   private def visit[T](map: mutable.Map[T, List[Hash]], t: T)(hashF: T => Unit): Unit =
     map.put(t, hash :: map.getOrElse(t, Nil)) match

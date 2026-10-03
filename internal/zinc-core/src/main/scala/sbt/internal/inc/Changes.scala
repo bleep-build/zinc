@@ -13,6 +13,7 @@ package sbt
 package internal
 package inc
 
+import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
 import xsbti.{ UseScope, VirtualFileRef }
@@ -100,18 +101,18 @@ final case class ModifiedNames(names: Set[UsedName]):
     s"ModifiedNames(changes = ${names.mkString(", ")})"
 object ModifiedNames:
   def compareTwoNameHashes(a: Array[NameHash], b: Array[NameHash]): ModifiedNames =
-    val xs = a.toSet
-    val ys = b.toSet
-    val changed = (xs union ys) diff (xs intersect ys)
-    val modifiedNames: Set[UsedName] = changed
-      .groupBy(_.name)
-      .map({
-        case (name, nameHashes) =>
-          UsedName(name, nameHashes.map(_.scope()))
-      })
-      .toSet
-
-    ModifiedNames(modifiedNames)
+    // Lazy, so that comparing against a class without an API (a new class, or every class of a
+    // clean build) does not build a set nothing looks into.
+    lazy val xs = a.toSet
+    lazy val ys = b.toSet
+    val scopesByName = mutable.HashMap.empty[String, java.util.EnumSet[UseScope]]
+    def modified(nameHash: NameHash): Unit =
+      scopesByName
+        .getOrElseUpdate(nameHash.name, java.util.EnumSet.noneOf(classOf[UseScope]))
+        .add(nameHash.scope)
+    a.foreach(nameHash => if !ys.contains(nameHash) then modified(nameHash))
+    b.foreach(nameHash => if !xs.contains(nameHash) then modified(nameHash))
+    ModifiedNames(scopesByName.iterator.map((name, scopes) => UsedName.make(name, scopes)).toSet)
 
 abstract class UnderlyingChanges[A] extends Changes[A]:
   def added: Set[A]

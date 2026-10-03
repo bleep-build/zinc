@@ -13,6 +13,8 @@ package sbt
 package internal
 package inc
 
+import scala.collection.mutable
+
 import sbt.internal.util.Relation
 import xsbti.VirtualFileRef
 import xsbti.api.{ DependencyContext, ExternalDependency, InternalDependency }
@@ -127,6 +129,14 @@ trait Relations:
   private[inc] def addExternalDeps(
       src: VirtualFileRef,
       deps: Iterable[ExternalDependency]
+  ): Relations
+
+  /**
+   * Records the internal and external dependencies of any number of sources.
+   */
+  private[inc] def addDependencies(
+      internalDeps: Iterable[InternalDependency],
+      externalDeps: Iterable[ExternalDependency]
   ): Relations
 
   /**
@@ -361,8 +371,42 @@ private[inc] object DependencyCollection:
       m2: Map[DependencyContext, Relation[String, T]]
   ) =
     m1.foldLeft(m2) {
-      case (tmp, (key, values)) => tmp.updated(key, tmp.getOrElse(key, Relation.empty) ++ values)
+      case (tmp, (key, values)) =>
+        tmp.updated(key, tmp.get(key).fold(values)(_ ++ values))
     }
+
+  /**
+   * The dependencies `deps`, each the edge `edge(dep)` = (context, from, to), as one relation per
+   * context.
+   */
+  def byContext[D](deps: Iterable[D])(
+      edge: D => (DependencyContext, String, String)
+  ): Map[DependencyContext, Relation[String, String]] =
+    val builders = mutable.HashMap.empty[DependencyContext, RelationBuilder]
+    deps.foreach { dep =>
+      val (context, from, to) = edge(dep)
+      builders.getOrElseUpdate(context, new RelationBuilder).add(from, to)
+    }
+    builders.iterator.map((context, builder) => context -> builder.result()).toMap
+
+  /**
+   * Builds a relation in one go. Adding pairs to a [[Relation]] one at a time instead updates
+   * both of its persistent maps for every pair.
+   */
+  private final class RelationBuilder:
+    private val forward = mutable.HashMap.empty[String, mutable.Builder[String, Set[String]]]
+    private val reverse = mutable.HashMap.empty[String, mutable.Builder[String, Set[String]]]
+
+    def add(from: String, to: String): Unit =
+      forward.getOrElseUpdate(from, Set.newBuilder) += to
+      reverse.getOrElseUpdate(to, Set.newBuilder) += from
+
+    def result(): Relation[String, String] = Relation.make(sets(forward), sets(reverse))
+
+    private def sets(m: mutable.HashMap[String, mutable.Builder[String, Set[String]]]) =
+      m.iterator.map((key, builder) => key -> builder.result()).toMap
+  end RelationBuilder
+end DependencyCollection
 
 private[inc] object InternalDependencies:
 
@@ -390,7 +434,11 @@ private case class InternalDependencies(
   /**
    * Adds all `deps` to the dependencies
    */
-  def ++(deps: Iterable[InternalDependency]): InternalDependencies = deps.foldLeft(this)(_ + _)
+  def ++(deps: Iterable[InternalDependency]): InternalDependencies =
+    val added = DependencyCollection.byContext(deps)(d =>
+      (d.context, d.sourceClassName, d.targetClassName)
+    )
+    InternalDependencies(DependencyCollection.joinMaps(added, dependencies))
   def ++(deps: InternalDependencies): InternalDependencies =
     InternalDependencies(DependencyCollection.joinMaps(dependencies, deps.dependencies))
 
@@ -435,7 +483,11 @@ private case class ExternalDependencies(
   /**
    * Adds all `deps` to the dependencies
    */
-  def ++(deps: Iterable[ExternalDependency]): ExternalDependencies = deps.foldLeft(this)(_ + _)
+  def ++(deps: Iterable[ExternalDependency]): ExternalDependencies =
+    val added = DependencyCollection.byContext(deps)(d =>
+      (d.context, d.sourceClassName, d.targetProductClassName)
+    )
+    ExternalDependencies(DependencyCollection.joinMaps(added, dependencies))
   def ++(deps: ExternalDependencies): ExternalDependencies =
     ExternalDependencies(DependencyCollection.joinMaps(dependencies, deps.dependencies))
 
@@ -543,6 +595,21 @@ private class MRelationsNameHashing(
       libraryClassName,
       internalDependencies,
       externalDependencies = externalDependencies ++ deps,
+      classes,
+      names,
+      productClassName,
+    )
+
+  private[inc] def addDependencies(
+      internalDeps: Iterable[InternalDependency],
+      externalDeps: Iterable[ExternalDependency]
+  ): Relations =
+    new MRelationsNameHashing(
+      srcProd,
+      libraryDep,
+      libraryClassName,
+      internalDependencies = internalDependencies ++ internalDeps,
+      externalDependencies = externalDependencies ++ externalDeps,
       classes,
       names,
       productClassName,

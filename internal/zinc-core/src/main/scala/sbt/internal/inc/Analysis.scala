@@ -79,6 +79,16 @@ trait Analysis extends CompileAnalysis:
       libraryDeps: Iterable[(VirtualFileRef, String, XStamp)]
   ): Analysis
 
+  /**
+   * Records dependencies between classes, of any number of sources. Adding the dependencies of
+   * many sources in one call builds the dependency relations once, where passing each source's
+   * dependencies to [[addSource]] updates them once per dependency.
+   */
+  def addDependencies(
+      internalDeps: Iterable[InternalDependency],
+      externalDeps: Iterable[ExternalDependency]
+  ): Analysis
+
   override lazy val toString = Analysis.summary(this)
 end Analysis
 
@@ -203,23 +213,28 @@ private class MAnalysis(
           acc.markLibrary(toBinary, className, binStamp)
       }
 
-    val newAPIs =
-      val apis1 = apis.foldLeft(this.apis) { (acc, analyzedClass) =>
-        acc.markInternalAPI(analyzedClass.name, analyzedClass)
-      }
-
-      externalDeps.foldLeft(apis1) { (acc, extDep) =>
-        acc.markExternalAPI(extDep.targetProductClassName, extDep.targetClass)
-      }
+    val newAPIs = apis.foldLeft(this.apis) { (acc, analyzedClass) =>
+      acc.markInternalAPI(analyzedClass.name, analyzedClass)
+    }
 
     val products = nonLocalProducts.map(_.classFile) ++ localProducts.map(_.classFile)
     val classes = nonLocalProducts.map(p => p.className -> p.binaryClassName)
 
     val newRelations =
-      relations.addSource(src, products, classes, internalDeps, externalDeps, libraryDeps)
+      relations.addSource(src, products, classes, Nil, Nil, libraryDeps)
 
     copy(newStamps, newAPIs, newRelations, infos.add(src, info))
+      .addDependencies(internalDeps, externalDeps)
   end addSource
+
+  def addDependencies(
+      internalDeps: Iterable[InternalDependency],
+      externalDeps: Iterable[ExternalDependency]
+  ): Analysis =
+    val newAPIs = externalDeps.foldLeft(apis) { (acc, extDep) =>
+      acc.markExternalAPI(extDep.targetProductClassName, extDep.targetClass)
+    }
+    copy(apis = newAPIs, relations = relations.addDependencies(internalDeps, externalDeps))
 
   override def equals(other: Any) = other match
     // Note: Equality doesn't consider source infos or compilations.

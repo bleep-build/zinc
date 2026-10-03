@@ -132,11 +132,12 @@ object Discovery:
 
   def pathName(p: APath, id: String): Option[String] =
     val cs = p.components
-    cs.last match
-      case _: This =>
-        val ids = cs.init.collect { case i: Id => i.id }
-        if ids.length == cs.length - 1 then Some((ids ++ Seq(id)).mkString(".")) else None
-      case _ => None
+    val prefix = 0 until cs.length - 1
+    if cs.last.isInstanceOf[This] && prefix.forall(cs(_).isInstanceOf[Id]) then
+      val name = new java.lang.StringBuilder
+      prefix.foreach(i => name.append(cs(i).asInstanceOf[Id].id).append('.'))
+      Some(name.append(id).toString)
+    else None
 
   def isUnit(t: Type): Boolean = named(t, "scala.Unit")
 end Discovery
