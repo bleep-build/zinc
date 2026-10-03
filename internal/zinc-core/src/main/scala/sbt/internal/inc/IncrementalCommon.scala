@@ -186,13 +186,18 @@ private[inc] abstract class IncrementalCommon(
         // stored API was read from the compiled classes and never equals the one from scalac.
         val unchangedJavaClasses =
           pipelinedJavaSources.flatMap(previous.relations.classNames) -- classesToRecompile
+        // A full compilation invalidates nothing after it, so its API changes would only reach the
+        // profiler. Diffing every class, which on a clean build means against no API at all, costs
+        // about as much as hashing the APIs did.
         val newApiChanges =
-          detectAPIChanges(
-            recompiledClasses -- unchangedJavaClasses,
-            previous.apis.internalAPI,
-            analysis.apis.internalAPI
-          )
-        if !isFullCompilation && newApiChanges.apiChanges.nonEmpty then
+          if isFullCompilation then new APIChanges(Nil)
+          else
+            detectAPIChanges(
+              recompiledClasses -- unchangedJavaClasses,
+              previous.apis.internalAPI,
+              analysis.apis.internalAPI
+            )
+        if newApiChanges.apiChanges.nonEmpty then
           invalidationLog.debug(
             InvalidationLog.section(
               s"Cycle $cycleNum API changes",
