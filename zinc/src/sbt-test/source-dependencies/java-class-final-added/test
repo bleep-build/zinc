@@ -1,0 +1,9 @@
+# `use` extends dep's class P. Making P final changes only P's own modifiers, not any member, so
+# the change must reach the API hash through the class header for `use` to be recompiled.
+> use/compile
+$ sleep 2000
+$ copy-file changes/P.java dep/src/main/java/P.java
+-> use/compile
+> use/clean
+> dep/clean
+-> use/compile

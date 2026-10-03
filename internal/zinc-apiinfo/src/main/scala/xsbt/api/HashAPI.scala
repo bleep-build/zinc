@@ -170,7 +170,21 @@ final class HashAPI private (
 
   def hashAPI(c: ClassLike): Unit =
     hash = 1
+    hashClassHeader(c)
     hashClass(c)
+
+  /**
+   * What a class declares about itself rather than its members: annotations, modifiers, access and
+   * kind. NameHashing already hashes them into the name hash of the class's own name, but a name
+   * hash is consulted only once the API hash differs, so a change confined to them (`final` or
+   * `sealed` added, a class made package-private, a Java class's generic signature) reached no
+   * dependent. A nested class is also a member of its owner, whose structure hashes it as one.
+   */
+  private def hashClassHeader(c: ClassLike): Unit =
+    hashAnnotations(c.annotations)
+    hashModifiers(c.modifiers)
+    hashAccess(c.access)
+    extend(c.definitionType.ordinal)
 
   def hashPackage(p: Package) = hashString(p.name)
 

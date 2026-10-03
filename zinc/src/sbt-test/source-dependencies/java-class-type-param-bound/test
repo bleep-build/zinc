@@ -1,0 +1,9 @@
+# `use` instantiates dep's G with a String type argument. Bounding G's type parameter by Number
+# changes no member descriptor or member signature, only G's own class Signature attribute.
+> use/compile
+$ sleep 2000
+$ copy-file changes/G.java dep/src/main/java/G.java
+-> use/compile
+> use/clean
+> dep/clean
+-> use/compile
