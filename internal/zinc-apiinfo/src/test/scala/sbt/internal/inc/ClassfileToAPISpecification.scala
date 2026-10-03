@@ -247,6 +247,28 @@ class ClassfileToAPISpecification extends UnitSpec:
     }
   }
 
+  // javac writes a protected member class as public in its own access_flags; only its InnerClasses
+  // entry keeps it protected, as a dependent outside the package must see.
+  it should "take a nested class's access from its InnerClasses entry" in {
+    IO.withTemporaryDirectory { temp =>
+      def innerApi(dirName: String, modifier: String): ClassLike =
+        val dir = new File(temp, dirName)
+        dir.mkdir()
+        val src = new File(dir, "Sample.java")
+        IO.write(src, s"public class Sample { $modifier static class Inner {} }")
+        JavaCompilerForUnitTesting.compileJava(Seq(src), dir, Seq.empty)
+        val cf = Parser(new File(dir, "Sample$Inner.class").toPath, Logger.Null)
+        processAlone(Seq("Sample.Inner" -> cf))._1
+          .find(_.definitionType == DefinitionType.ClassDef)
+          .get
+      val public = innerApi("a", "public")
+      val protectedInner = innerApi("b", "protected")
+      assert(public.access.isInstanceOf[xsbti.api.Public])
+      assert(protectedInner.access.isInstanceOf[xsbti.api.Protected])
+      assert(HashAPI(public) != HashAPI(protectedInner))
+    }
+  }
+
   // P3: only a method actually named `main` (not just any public-static-void(String[])) is a main.
   it should "treat only a method named main as a main class" in {
     IO.withTemporaryDirectory { temp =>

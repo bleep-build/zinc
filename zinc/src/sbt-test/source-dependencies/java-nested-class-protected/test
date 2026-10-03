@@ -1,0 +1,10 @@
+# `use`, in another package, instantiates dep's public member class p.O.I. Making I protected
+# changes nothing in I's own access_flags, where javac writes a protected member class as public;
+# only I's entry in its InnerClasses attribute says protected.
+> use/compile
+$ sleep 2000
+$ copy-file changes/p_O.java dep/src/main/java/p/O.java
+-> use/compile
+> use/clean
+> dep/clean
+-> use/compile

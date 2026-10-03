@@ -282,9 +282,10 @@ object ClassfileToAPI:
     // HashAPI hashes children, so adding, removing or unsealing a subclass changes the hash.
     val permitted = permittedSubclassNames(cf)
     val children: Array[api.Type] = permitted.map(ClassToAPI.reference).toArray
-    val mods = classModifiers(cf.accessFlags, permitted.nonEmpty)
-    val acc = ClassToAPI.access(cf.accessFlags, enclPkg)
-    val isInterface = Modifier.isInterface(cf.accessFlags)
+    val flags = declaredFlags(cf)
+    val mods = classModifiers(flags, permitted.nonEmpty)
+    val acc = ClassToAPI.access(flags, enclPkg)
+    val isInterface = Modifier.isInterface(flags)
     val tpe = if isInterface then Trait else ClassDef
     // Top-level unless the classfile's InnerClasses attribute lists itself as a member of another.
     val topLevel =
@@ -350,6 +351,18 @@ object ClassfileToAPI:
     )
     cls :: stat :: Nil
   end classLikes
+
+  /**
+   * The flags the class was declared with. A nested class's own `access_flags` cannot say private,
+   * protected or static (JVMS 4.1): javac writes a private member class as package-private and a
+   * protected one as public, and keeps the declared flags in the class's entry in its own
+   * `InnerClasses` attribute (JVMS 4.7.6), which is also what `Class.getModifiers` reads. A
+   * top-level class has no such entry.
+   */
+  private def declaredFlags(cf: ClassFile): Int =
+    cf.innerClasses.find(_.innerClassName == cf.className) match
+      case Some(entry) => entry.accessFlags
+      case None        => cf.accessFlags
 
   /**
    * [[ClassToAPI.modifiers]] plus `sealed`, which no JVM access flag carries. With
