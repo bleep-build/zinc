@@ -1,6 +1,9 @@
-# `use` deconstructs dep's record R(int x, int y) with a record pattern. Swapping the components
-# keeps every member and the canonical constructor's descriptor, yet changes what the pattern binds
-# to each variable, so `use` must be recompiled even though it still compiles.
+# Swapping the components of dep's record R(int x, int y) keeps every member and the canonical
+# constructor's descriptor, yet changes what a record pattern `R(int a, int b)` binds to each
+# variable: a dependent compiled against the old order reads the wrong values, with no error. So
+# the order must reach R's API hash, and dependents of R must be recompiled.
+# `use` only calls R's accessors, in Java 17 syntax, because record patterns need Java 21 and this
+# test runs on JDK 17 too. For a Java dependent, being recompiled is the whole question.
 > use/compile
 $ sleep 2000
 $ copy-file changes/R.java dep/src/main/java/R.java
