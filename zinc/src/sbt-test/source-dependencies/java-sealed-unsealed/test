@@ -1,9 +1,10 @@
-# `use` switches exhaustively over dep's sealed interface S, with no default. Unsealing S changes
-# no member, only drops the PermittedSubclasses attribute, yet makes the switch non-exhaustive.
+# Unsealing dep's sealed interface S changes no member, only drops its PermittedSubclasses
+# attribute. It still changes what compiles against S: an exhaustive
+# `switch (s) { case X x -> ...; case Y y -> ...; }` stops compiling. So the change must reach S's
+# API hash, or dependents of S are not recompiled.
+# `use` only refers to S, in Java 17 syntax, because pattern matching in switch needs Java 21 and
+# this test runs on JDK 17 too. For a Java dependent, being recompiled is the whole question.
 > use/compile
 $ sleep 2000
 $ copy-file changes/S.java dep/src/main/java/S.java
--> use/compile
-> use/clean
-> dep/clean
--> use/compile
+> use/checkRecompilations 1 A

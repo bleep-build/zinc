@@ -1,12 +1,13 @@
-# `use` switches exhaustively over dep's sealed interface S (permits X, Y), with no default.
-# Adding Z to the permits list changes no member of S, only its PermittedSubclasses attribute, yet
-# makes the switch non-exhaustive. The change must reach S's API hash, or `use` is not recompiled
-# and the build stays green when it should fail. Cross-module, so the external-API path is checked.
+# Adding Z to the permits list of dep's sealed interface S changes no member of S, only its
+# PermittedSubclasses attribute. It still changes what compiles against S: an exhaustive
+# `switch (s) { case X x -> ...; case Y y -> ...; }` stops compiling. So the change must reach S's
+# API hash, or dependents of S are not recompiled. Cross-module, so the external-API path is
+# checked.
+# `use` only refers to S, in Java 17 syntax, because pattern matching in switch needs Java 21 and
+# this test runs on JDK 17 too. For a Java dependent, being recompiled is the whole question:
+# javac then reports the non-exhaustive switch itself.
 > use/compile
 $ sleep 2000
 $ copy-file changes/S.java dep/src/main/java/S.java
 $ copy-file changes/Z.java dep/src/main/java/Z.java
--> use/compile
-> use/clean
-> dep/clean
--> use/compile
+> use/checkRecompilations 1 A
