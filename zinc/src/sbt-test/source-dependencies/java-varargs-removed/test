@@ -1,0 +1,9 @@
+# `use` calls dep's D.m("a", "b"). Turning the varargs parameter of m into a plain String array
+# keeps the descriptor and changes only ACC_VARARGS, yet the call no longer compiles.
+> use/compile
+$ sleep 2000
+$ copy-file changes/D.java dep/src/main/java/D.java
+-> use/compile
+> use/clean
+> dep/clean
+-> use/compile

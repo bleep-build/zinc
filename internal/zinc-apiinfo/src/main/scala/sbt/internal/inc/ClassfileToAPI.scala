@@ -30,12 +30,13 @@ import sbt.util.Logger
  * It mirrors the structure [[ClassToAPI]] produces (a class + module `ClassLike` pair, declared
  * members split into static/instance) and reuses [[ClassToAPI]]'s access/modifier/type helpers, so
  * the result slots into the same analysis. Member types are erased (from JVM descriptors), but
- * generic signatures, checked exceptions, and declared annotations are folded in conservatively (raw
- * `Signature` string / `throws` and annotation *type* names — not annotation element values), so a
- * change to any of them still changes the hash. Enum children and type parameters are not modelled —
- * see the "Phase 2" scope in docs/design/classfile-based-java-api.md. The output need not match the
- * reflection-derived API byte-for-byte; it only needs to be deterministic and to change when the
- * class's public shape changes.
+ * generic signatures, checked exceptions, and declared and parameter annotations are folded in
+ * conservatively (raw `Signature` string / `throws` names / annotations rendered with their element
+ * values), so a change to any of them still changes the hash. A sealed class's permitted subclasses are its
+ * children. Enum children and type parameters are not modelled — see the "Phase 2" scope in
+ * docs/design/classfile-based-java-api.md. The output need not match the reflection-derived API
+ * byte-for-byte; it only needs to be deterministic and to change when the class's public shape
+ * changes.
  *
  * Inherited members ARE modelled, via [[inheritedDefinitions]] and the caller-supplied [[Resolve]].
  * Without them a subclass whose supertype changed keeps its old hash — its own classfile is
@@ -54,10 +55,9 @@ object ClassfileToAPI:
   private def strict[T <: AnyRef](t: T): api.Lazy[T] = SafeLazyProxy.strict(t)
 
   // A synthetic annotation that folds public-shape signals the erased descriptor can't capture —
-  // the raw generic Signature, checked-exception (throws) types, and declared annotation types —
-  // into the API, so changing any of them still changes the hash. Conservative Phase-2 fold (raw
-  // Signature string and exception/annotation *type* names, not annotation element values); proper
-  // modelling is Phase 3.
+  // the raw generic Signature, checked-exception (throws) types, and declared and parameter
+  // annotations with their element values — into the API, so changing any of them still changes
+  // the hash. A conservative fold of raw strings; proper modelling is Phase 3.
   private val SyntheticRef = ClassToAPI.reference("xsbti.api.ClassfileApi")
 
   private def syntheticAnnotations(parts: (String, Iterable[String])*): Array[api.Annotation] =
@@ -83,31 +83,109 @@ object ClassfileToAPI:
           }
         catch case _: Throwable => Nil
 
-  /** Declared annotation type names from RuntimeVisible/Invisible annotations (JVMS 4.7.16). */
-  private def annotationTypeNames(cf: ClassFile, attrs: Seq[AttributeInfo]): Seq[String] =
-    val names = ArrayBuffer.empty[String]
-    for a <- attrs if a.isRuntimeVisibleAnnotations || a.isRuntimeInvisibleAnnotations do
-      try
+  /**
+   * The binary names in a sealed class's `PermittedSubclasses` attribute (JVMS 4.7.31), empty for a
+   * class that is not sealed. javac writes the attribute whether the subclasses are listed in a
+   * `permits` clause or inferred from the compilation unit.
+   */
+  private def permittedSubclassNames(cf: ClassFile): Seq[String] =
+    cf.attributes.find(_.isNamed("PermittedSubclasses")) match
+      case None    => Nil
+      case Some(a) =>
         val in = new DataInputStream(new ByteArrayInputStream(a.value))
-        def utf8(i: Int): String = cf.constantPool(i).value.fold("")(_.toString)
-        def skipElementValue(): Unit =
-          in.readUnsignedByte().toChar match
-            case 'e' => in.readUnsignedShort(); in.readUnsignedShort()
-            case 'c' => in.readUnsignedShort()
-            case '@' => readAnnotation()
-            case '[' =>
-              val n = in.readUnsignedShort()
-              (0 until n).foreach(_ => skipElementValue())
-            case _ => in.readUnsignedShort()
-        def readAnnotation(): Unit =
-          names += utf8(in.readUnsignedShort()).stripPrefix("L").stripSuffix(";").replace('/', '.')
-          val pairs = in.readUnsignedShort()
-          (0 until pairs).foreach { _ => in.readUnsignedShort(); skipElementValue() }
-        val num = in.readUnsignedShort()
-        (0 until num).foreach(_ => readAnnotation())
-      catch case _: Throwable => ()
-    names.toSeq
-  end annotationTypeNames
+        val count = in.readUnsignedShort()
+        List.fill(count) {
+          val classConstant = cf.constantPool(in.readUnsignedShort())
+          cf.constantPool(classConstant.nameIndex).value match
+            case Some(name) => name.toString.replace('/', '.')
+            case None       =>
+              throw new IllegalStateException(
+                s"${cf.className}: PermittedSubclasses entry $classConstant names no class"
+              )
+        }
+
+  /**
+   * A record's components in declaration order, as `name:descriptor`, from its `Record` attribute
+   * (JVMS 4.7.30); empty for a class that is not a record.
+   */
+  private def recordComponents(cf: ClassFile): Seq[String] =
+    cf.attributes.find(_.isRecord) match
+      case None    => Nil
+      case Some(a) =>
+        val in = new DataInputStream(new ByteArrayInputStream(a.value))
+        def utf8(i: Int): String = cf.constantPool(i).value match
+          case Some(value) => value.toString
+          case None        =>
+            throw new IllegalStateException(s"${cf.className}: Record names no string at $i")
+        val count = in.readUnsignedShort()
+        List.fill(count) {
+          val name = utf8(in.readUnsignedShort())
+          val descriptor = utf8(in.readUnsignedShort())
+          val attributes = in.readUnsignedShort()
+          (0 until attributes).foreach { _ =>
+            in.readUnsignedShort()
+            in.readFully(new Array[Byte](in.readInt()))
+          }
+          s"$name:$descriptor"
+        }
+
+  /**
+   * Declared annotations from RuntimeVisible/Invisible annotations (JVMS 4.7.16), each rendered
+   * with its element values. The values matter to dependents: an annotation processor or a nullness
+   * checker running on a dependent reads them, as ClassToAPI's `Annotation.toString` captures.
+   */
+  private def annotationDescriptions(cf: ClassFile, attrs: Seq[AttributeInfo]): Seq[String] =
+    attrs
+      .filter(a => a.isRuntimeVisibleAnnotations || a.isRuntimeInvisibleAnnotations)
+      .flatMap { a =>
+        val in = new DataInputStream(new ByteArrayInputStream(a.value))
+        List.fill(in.readUnsignedShort())(renderAnnotation(cf, in))
+      }
+
+  /**
+   * Parameter annotations from RuntimeVisible/InvisibleParameterAnnotations (JVMS 4.7.18), one
+   * entry per annotated parameter, prefixed with its position.
+   */
+  private def parameterAnnotationDescriptions(
+      cf: ClassFile,
+      attrs: Seq[AttributeInfo]
+  ): Seq[String] =
+    attrs
+      .filter(a =>
+        a.isRuntimeVisibleParameterAnnotations || a.isRuntimeInvisibleParameterAnnotations
+      )
+      .flatMap { a =>
+        val in = new DataInputStream(new ByteArrayInputStream(a.value))
+        val parameters = in.readUnsignedByte()
+        (0 until parameters).flatMap { i =>
+          List.fill(in.readUnsignedShort())(s"$i:${renderAnnotation(cf, in)}")
+        }
+      }
+
+  private def renderAnnotation(cf: ClassFile, in: DataInputStream): String =
+    val tpe = constantText(cf, in.readUnsignedShort())
+    val pairs = List.fill(in.readUnsignedShort()) {
+      val name = constantText(cf, in.readUnsignedShort())
+      s"$name=${renderElementValue(cf, in)}"
+    }
+    pairs.mkString(s"$tpe(", ",", ")")
+
+  /** An `element_value` (JVMS 4.7.16.1), with its constants resolved. */
+  private def renderElementValue(cf: ClassFile, in: DataInputStream): String =
+    in.readUnsignedByte().toChar match
+      case 'e' =>
+        val enumType = constantText(cf, in.readUnsignedShort())
+        s"$enumType.${constantText(cf, in.readUnsignedShort())}"
+      case '@' => renderAnnotation(cf, in)
+      case '[' =>
+        List.fill(in.readUnsignedShort())(renderElementValue(cf, in)).mkString("[", ",", "]")
+      case tag => s"$tag${constantText(cf, in.readUnsignedShort())}"
+
+  private def constantText(cf: ClassFile, index: Int): String =
+    cf.constantPool(index).value match
+      case Some(value) => value.toString
+      case None        =>
+        throw new IllegalStateException(s"${cf.className}: no constant value at index $index")
 
   /**
    * Produces the API (class + module `ClassLike` for each input) and the names of any classes that
@@ -230,9 +308,15 @@ object ClassfileToAPI:
     // Use the binary name's package (last '.' before the simple/binary name); the canonical name's
     // dots would mis-split nested classes (e.g. "pkg.Outer.Inner").
     val enclPkg = ClassToAPI.packageAndName(cf.className)._1
-    val mods = ClassToAPI.modifiers(cf.accessFlags)
-    val acc = ClassToAPI.access(cf.accessFlags, enclPkg)
-    val isInterface = Modifier.isInterface(cf.accessFlags)
+    // A sealed class's permitted subclasses decide which `switch`es over it are exhaustive and which
+    // classes may extend it, so they are its children, as an enum's constants are in ClassToAPI.
+    // HashAPI hashes children, so adding, removing or unsealing a subclass changes the hash.
+    val permitted = permittedSubclassNames(cf)
+    val children: Array[api.Type] = permitted.map(ClassToAPI.reference).toArray
+    val flags = declaredFlags(cf)
+    val mods = classModifiers(flags, permitted.nonEmpty)
+    val acc = ClassToAPI.access(flags, enclPkg)
+    val isInterface = Modifier.isInterface(flags)
     val tpe = if isInterface then Trait else ClassDef
     // Top-level unless the classfile's InnerClasses attribute lists itself as a member of another.
     val topLevel =
@@ -254,9 +338,13 @@ object ClassfileToAPI:
       .map(ClassToAPI.reference)
       .toArray
 
+    // A record pattern binds components by position, so `record R(int x, int y)` becoming
+    // `record R(int y, int x)` changes what `case R(int a, int b)` binds, though the members and the
+    // canonical constructor's descriptor stay the same. Hence the component order.
     val classAnnots = syntheticAnnotations(
       "signature" -> cf.attributes.find(_.isSignature).map(cf.stringValue).toList,
-      "annotations" -> annotationTypeNames(cf, cf.attributes.toIndexedSeq)
+      "annotations" -> annotationDescriptions(cf, cf.attributes.toIndexedSeq),
+      "record" -> recordComponents(cf)
     )
 
     val (staticInherited, instanceInherited) = inheritedDefinitions(cf, resolve, memo)
@@ -275,7 +363,7 @@ object ClassfileToAPI:
       strict(ClassToAPI.Empty),
       strict(instanceStructure),
       noStrings,
-      noTypes,
+      children,
       topLevel,
       noTypeParameters
     )
@@ -294,6 +382,35 @@ object ClassfileToAPI:
     )
     cls :: stat :: Nil
   end classLikes
+
+  /**
+   * The flags the class was declared with. A nested class's own `access_flags` cannot say private,
+   * protected or static (JVMS 4.1): javac writes a private member class as package-private and a
+   * protected one as public, and keeps the declared flags in the class's entry in its own
+   * `InnerClasses` attribute (JVMS 4.7.6), which is also what `Class.getModifiers` reads. A
+   * top-level class has no such entry.
+   */
+  private def declaredFlags(cf: ClassFile): Int =
+    cf.innerClasses.find(_.innerClassName == cf.className) match
+      case Some(entry) => entry.accessFlags
+      case None        => cf.accessFlags
+
+  /**
+   * [[ClassToAPI.modifiers]] plus `sealed`, which no JVM access flag carries. With
+   * `useOptimizedSealed`, NameHashing gives children only to classes marked sealed, so without the
+   * flag a Scala dependent matching on a sealed Java type would not see its children change.
+   */
+  private def classModifiers(accessFlags: Int, isSealed: Boolean): api.Modifiers =
+    new api.Modifiers(
+      Modifier.isAbstract(accessFlags),
+      false,
+      Modifier.isFinal(accessFlags),
+      isSealed,
+      false,
+      false,
+      false,
+      false
+    )
 
   /** (isStatic, FieldLike) for a classfile field. */
   private def fieldDef(
@@ -318,7 +435,7 @@ object ClassfileToAPI:
     val acc = ClassToAPI.access(f.accessFlags, enclPkg)
     val annots = syntheticAnnotations(
       "signature" -> f.attributes.find(_.isSignature).map(cf.stringValue).toList,
-      "annotations" -> annotationTypeNames(cf, f.attributes)
+      "annotations" -> annotationDescriptions(cf, f.attributes)
     )
     val fieldLike =
       if mods.isFinal then api.Val.of(name, acc, mods, annots, tpe)
@@ -334,9 +451,15 @@ object ClassfileToAPI:
       enclPkg: Option[String]
   ): (Boolean, api.ClassDefinition) =
     val (paramTypes, returnType) = parseMethodType(m.descriptor.getOrElse("()V"))
-    val params = paramTypes.map(t =>
-      api.MethodParameter.of("", t, false, api.ParameterModifier.Plain)
-    )
+    // `m(String... a)` and `m(String[] a)` share a descriptor, but only the first accepts
+    // `m("a", "b")`. Mark the varargs parameter as ClassToAPI.defLike does.
+    val varArgPosition = if (m.accessFlags & AccVarargs) != 0 then paramTypes.length - 1 else -1
+    val params = paramTypes.zipWithIndex.map { (t, i) =>
+      val modifier =
+        if i == varArgPosition then api.ParameterModifier.Repeated
+        else api.ParameterModifier.Plain
+      api.MethodParameter.of("", t, false, modifier)
+    }
     val paramList = api.ParameterList.of(params, false)
     // Match ClassToAPI.uniqueConstructorName, which uses the binary (not canonical) class name.
     val name =
@@ -347,11 +470,15 @@ object ClassfileToAPI:
     val annots = syntheticAnnotations(
       "signature" -> m.attributes.find(_.isSignature).map(cf.stringValue).toList,
       "throws" -> exceptionNames(cf, m.attributes),
-      "annotations" -> annotationTypeNames(cf, m.attributes)
+      "annotations" -> annotationDescriptions(cf, m.attributes),
+      "parameterAnnotations" -> parameterAnnotationDescriptions(cf, m.attributes)
     )
     val d = api.Def.of(name, acc, mods, annots, noTypeParameters, Array(paramList), returnType)
     (m.isStatic, d)
   end methodDef
+
+  /** ACC_VARARGS (JVMS 4.6); java.lang.reflect.Modifier keeps its equivalent private. */
+  private final val AccVarargs = 0x0080
 
   private val ObjectRef = ClassToAPI.reference("java.lang.Object")
 

@@ -1,0 +1,7 @@
+# `use` deconstructs dep's record R(int x, int y) with a record pattern. Swapping the components
+# keeps every member and the canonical constructor's descriptor, yet changes what the pattern binds
+# to each variable, so `use` must be recompiled even though it still compiles.
+> use/compile
+$ sleep 2000
+$ copy-file changes/R.java dep/src/main/java/R.java
+> use/checkRecompilations 1 A

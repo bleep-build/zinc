@@ -1,0 +1,6 @@
+# `use` calls dep's D.m. Changing only an element value of an annotation on m must still recompile
+# `use`: an annotation processor or nullness checker running on `use` reads those values.
+> use/compile
+$ sleep 2000
+$ copy-file changes/D.java dep/src/main/java/D.java
+> use/checkRecompilations 1 A

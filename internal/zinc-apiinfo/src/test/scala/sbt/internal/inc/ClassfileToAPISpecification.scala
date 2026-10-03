@@ -196,6 +196,98 @@ class ClassfileToAPISpecification extends UnitSpec:
     }
   }
 
+  // javac records a sealed type's permitted subclasses only in its PermittedSubclasses attribute,
+  // which changes no member, yet they decide which switches over the type are exhaustive and which
+  // classes may extend it.
+  it should "detect changes to a sealed type's permitted subclasses" in {
+    IO.withTemporaryDirectory { temp =>
+      val xy = "final class X implements Sample {} final class Y implements Sample {}"
+      val sealedXY = sampleApis(temp, "a", s"public sealed interface Sample { $xy }")
+      val sealedXYZ = sampleApis(
+        temp,
+        "b",
+        s"public sealed interface Sample { $xy final class Z implements Sample {} }"
+      )
+      val open = sampleApis(temp, "c", s"public interface Sample { $xy }")
+      val openAgain = sampleApis(temp, "d", s"public interface Sample { $xy }")
+
+      def sampleTrait(apis: Seq[ClassLike]): ClassLike =
+        apis.find(_.definitionType == DefinitionType.Trait).get
+      assert(sampleTrait(sealedXY).modifiers.isSealed)
+      assert(!sampleTrait(open).modifiers.isSealed)
+      assert(
+        sampleTrait(sealedXY).childrenOfSealedClass.toSeq.map(_.toString).sorted ==
+          Seq("Sample$X", "Sample$Y").map(n => ClassToAPI.reference(n).toString)
+      )
+      assert(hashAll(sealedXY) != hashAll(sealedXYZ), "adding a permitted subclass")
+      assert(hashAll(sealedXY) != hashAll(open), "unsealing")
+      assert(hashAll(open) == hashAll(openAgain))
+    }
+  }
+
+  // A varargs method and its array twin share a descriptor; only ACC_VARARGS tells them apart, and
+  // only the varargs one accepts `run("a", "b")`.
+  it should "detect a method gaining or losing varargs" in {
+    IO.withTemporaryDirectory { temp =>
+      val varargs = sampleApis(temp, "a", "public class Sample { public void run(String... a) {} }")
+      val array = sampleApis(temp, "b", "public class Sample { public void run(String[] a) {} }")
+      assert(hashAll(varargs) != hashAll(array))
+    }
+  }
+
+  // Swapping two same-typed record components keeps every member and the canonical constructor's
+  // descriptor, but changes what a record pattern `case Sample(int a, int b)` binds to a and b.
+  it should "detect reordered record components" in {
+    IO.withTemporaryDirectory { temp =>
+      val xy = sampleApis(temp, "a", "public record Sample(int x, int y) {}")
+      val yx = sampleApis(temp, "b", "public record Sample(int y, int x) {}")
+      val xyAgain = sampleApis(temp, "c", "public record Sample(int x, int y) {}")
+      assert(hashAll(xy) != hashAll(yx))
+      assert(hashAll(xy) == hashAll(xyAgain))
+    }
+  }
+
+  // javac writes a protected member class as public in its own access_flags; only its InnerClasses
+  // entry keeps it protected, as a dependent outside the package must see.
+  it should "take a nested class's access from its InnerClasses entry" in {
+    IO.withTemporaryDirectory { temp =>
+      def innerApi(dirName: String, modifier: String): ClassLike =
+        val dir = new File(temp, dirName)
+        dir.mkdir()
+        val src = new File(dir, "Sample.java")
+        IO.write(src, s"public class Sample { $modifier static class Inner {} }")
+        JavaCompilerForUnitTesting.compileJava(Seq(src), dir, Seq.empty)
+        val cf = Parser(new File(dir, "Sample$Inner.class").toPath, Logger.Null)
+        processAlone(Seq("Sample.Inner" -> cf))._1
+          .find(_.definitionType == DefinitionType.ClassDef)
+          .get
+      val public = innerApi("a", "public")
+      val protectedInner = innerApi("b", "protected")
+      assert(public.access.isInstanceOf[xsbti.api.Public])
+      assert(protectedInner.access.isInstanceOf[xsbti.api.Protected])
+      assert(HashAPI(public) != HashAPI(protectedInner))
+    }
+  }
+
+  // An annotation processor or nullness checker on a dependent reads annotation element values and
+  // parameter annotations, so both are public shape.
+  it should "detect annotation element value and parameter annotation changes" in {
+    IO.withTemporaryDirectory { temp =>
+      def method(dirName: String, signature: String) =
+        sampleApis(temp, dirName, s"public class Sample { $signature {} }")
+      val since1 = method("a", "@Deprecated(since = \"1\") public void run()")
+      val since2 = method("b", "@Deprecated(since = \"2\") public void run()")
+      val since1Again = method("c", "@Deprecated(since = \"1\") public void run()")
+      assert(hashAll(since1) != hashAll(since2))
+      assert(hashAll(since1) == hashAll(since1Again))
+
+      val plain = method("d", "public void run(String a, String b)")
+      val first = method("e", "public void run(@Deprecated String a, String b)")
+      val second = method("f", "public void run(String a, @Deprecated String b)")
+      assert(Set(hashAll(plain), hashAll(first), hashAll(second)).size == 3)
+    }
+  }
+
   // P3: only a method actually named `main` (not just any public-static-void(String[])) is a main.
   it should "treat only a method named main as a main class" in {
     IO.withTemporaryDirectory { temp =>
