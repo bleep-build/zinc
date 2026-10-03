@@ -84,7 +84,8 @@ class ClassfileToAPISpecification extends UnitSpec:
         classesDir,
         Seq(outerFile),
         (cb, src, named, resolve) =>
-          val (apis, _) = ClassfileToAPI.process(named, resolve)
+          val (apis, _) =
+            ClassfileToAPI.process(named, resolve, new ClassfileToAPI.Supertypes, Logger.Null)
           apis.foreach(cb.api(src, _))
       )
 
@@ -227,5 +228,10 @@ class ClassfileToAPISpecification extends UnitSpec:
 
   /** The API of a batch whose supertypes outside it stay unresolved, as for a lone class. */
   private def processAlone(named: Seq[(String, ClassFile)]): (Seq[ClassLike], Seq[String]) =
-    ClassfileToAPI.process(named, ClassfileToAPI.resolveWithin(named))
+    ClassfileToAPI.process(
+      named,
+      ClassfileToAPI.resolveWithin(named),
+      new ClassfileToAPI.Supertypes,
+      Logger.Null
+    )
 end ClassfileToAPISpecification

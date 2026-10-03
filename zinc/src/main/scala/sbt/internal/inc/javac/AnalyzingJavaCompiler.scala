@@ -201,12 +201,13 @@ final class AnalyzingJavaCompiler private[sbt] (
       // classpath, reading bytes, never defining a class) so `structure.inherited` stays as
       // complete as `Class.getMethods` made it — without that, a supertype change in another
       // project would not move this class's hash and its dependents would go stale.
+      val supertypes = new ClassfileToAPI.Supertypes
       def readAPI(
           source: VirtualFileRef,
           named: Seq[(String, ClassFile)],
           resolve: String => Option[ClassFile]
       ): Set[(String, String)] =
-        val (apis, mainClasses) = ClassfileToAPI.process(named, resolve, log)
+        val (apis, mainClasses) = ClassfileToAPI.process(named, resolve, supertypes, log)
         apis.foreach(callback.api(source, _))
         mainClasses.foreach(callback.mainClass(source, _))
         named.iterator.flatMap {

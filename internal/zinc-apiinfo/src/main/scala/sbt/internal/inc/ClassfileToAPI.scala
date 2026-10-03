@@ -117,15 +117,13 @@ object ClassfileToAPI:
   def process(
       named: Seq[(String, ClassFile)],
       resolve: Resolve,
-      log: Logger = Logger.Null
+      supertypes: Supertypes,
+      log: Logger
   ): (Seq[api.ClassLike], Seq[String]) =
     val classApis = ArrayBuffer.empty[api.ClassLike]
     val mainClasses = ArrayBuffer.empty[String]
-    // One memo for the whole batch. Without it every subclass re-walks and re-converts its entire
-    // supertype chain, which on a deep hierarchy costs more than the reflection this replaces.
-    val memo = new java.util.HashMap[String, Members]
     for (name, cf) <- named do
-      classApis ++= classLikes(name, cf, resolve, memo)
+      classApis ++= classLikes(name, cf, resolve, supertypes.members)
       if cf.methods.exists(_.isMain) then mainClasses += name
     (classApis.toSeq, mainClasses.toSeq)
 
@@ -161,6 +159,16 @@ object ClassfileToAPI:
    */
   private type Members = (Array[api.ClassDefinition], Array[api.ClassDefinition])
 
+  /**
+   * The members of supertypes, converted once and shared by every class that inherits them.
+   * Without it every subclass re-walks and re-converts its entire supertype chain, which on a deep
+   * hierarchy costs more than the reflection this replaces. Use one per compile, so that the
+   * classes of every source share it: a name must keep resolving to the same classfile for as
+   * long as an instance is used.
+   */
+  final class Supertypes:
+    private[ClassfileToAPI] val members = new java.util.HashMap[String, Members]
+
   private def inheritedDefinitions(
       cf: ClassFile,
       resolve: Resolve,
@@ -171,7 +179,7 @@ object ClassfileToAPI:
     val seen = scala.collection.mutable.HashSet.empty[String]
 
     /**
-     * This type's own members, converted once and reused by every subclass in the batch. Ordered by
+     * This type's own members, converted once and reused by every subclass in the compile. Ordered by
      * declaration, which is fixed by the classfile — so callers can concatenate without re-sorting.
      */
     def ownMembers(parent: ClassFile): Members =
