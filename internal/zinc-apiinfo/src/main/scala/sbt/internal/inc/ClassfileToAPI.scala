@@ -105,6 +105,31 @@ object ClassfileToAPI:
               )
         }
 
+  /**
+   * A record's components in declaration order, as `name:descriptor`, from its `Record` attribute
+   * (JVMS 4.7.30); empty for a class that is not a record.
+   */
+  private def recordComponents(cf: ClassFile): Seq[String] =
+    cf.attributes.find(_.isRecord) match
+      case None    => Nil
+      case Some(a) =>
+        val in = new DataInputStream(new ByteArrayInputStream(a.value))
+        def utf8(i: Int): String = cf.constantPool(i).value match
+          case Some(value) => value.toString
+          case None        =>
+            throw new IllegalStateException(s"${cf.className}: Record names no string at $i")
+        val count = in.readUnsignedShort()
+        List.fill(count) {
+          val name = utf8(in.readUnsignedShort())
+          val descriptor = utf8(in.readUnsignedShort())
+          val attributes = in.readUnsignedShort()
+          (0 until attributes).foreach { _ =>
+            in.readUnsignedShort()
+            in.readFully(new Array[Byte](in.readInt()))
+          }
+          s"$name:$descriptor"
+        }
+
   /** Declared annotation type names from RuntimeVisible/Invisible annotations (JVMS 4.7.16). */
   private def annotationTypeNames(cf: ClassFile, attrs: Seq[AttributeInfo]): Seq[String] =
     val names = ArrayBuffer.empty[String]
@@ -281,9 +306,13 @@ object ClassfileToAPI:
       .map(ClassToAPI.reference)
       .toArray
 
+    // A record pattern binds components by position, so `record R(int x, int y)` becoming
+    // `record R(int y, int x)` changes what `case R(int a, int b)` binds, though the members and the
+    // canonical constructor's descriptor stay the same. Hence the component order.
     val classAnnots = syntheticAnnotations(
       "signature" -> cf.attributes.find(_.isSignature).map(cf.stringValue).toList,
-      "annotations" -> annotationTypeNames(cf, cf.attributes.toIndexedSeq)
+      "annotations" -> annotationTypeNames(cf, cf.attributes.toIndexedSeq),
+      "record" -> recordComponents(cf)
     )
 
     val (staticInherited, instanceInherited) = inheritedDefinitions(cf, resolve, memo)

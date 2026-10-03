@@ -235,6 +235,18 @@ class ClassfileToAPISpecification extends UnitSpec:
     }
   }
 
+  // Swapping two same-typed record components keeps every member and the canonical constructor's
+  // descriptor, but changes what a record pattern `case Sample(int a, int b)` binds to a and b.
+  it should "detect reordered record components" in {
+    IO.withTemporaryDirectory { temp =>
+      val xy = sampleApis(temp, "a", "public record Sample(int x, int y) {}")
+      val yx = sampleApis(temp, "b", "public record Sample(int y, int x) {}")
+      val xyAgain = sampleApis(temp, "c", "public record Sample(int x, int y) {}")
+      assert(hashAll(xy) != hashAll(yx))
+      assert(hashAll(xy) == hashAll(xyAgain))
+    }
+  }
+
   // P3: only a method actually named `main` (not just any public-static-void(String[])) is a main.
   it should "treat only a method named main as a main class" in {
     IO.withTemporaryDirectory { temp =>
