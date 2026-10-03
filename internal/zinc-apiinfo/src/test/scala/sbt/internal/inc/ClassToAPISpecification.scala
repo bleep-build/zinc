@@ -17,7 +17,6 @@ import java.io.File
 import scala.util.Using
 import sbt.internal.inc.classfile.JavaCompilerForUnitTesting
 import sbt.io.IO
-import xsbti.{ AnalysisCallback, VirtualFileRef }
 import xsbti.api.{ ClassLike, ClassLikeDef, DefinitionType }
 
 class ClassToAPISpecification extends UnitSpec:
@@ -205,10 +204,23 @@ class ClassToAPISpecification extends UnitSpec:
    * extracted by ClassToAPI class.
    */
   private def extractApisFromSrc(src: (String, String)): Set[Companions] =
-    val (Seq(tempSrcFile), analysisCallback) =
-      JavaCompilerForUnitTesting.compileJavaSrcs(src)(readAPI)
-    val apis = analysisCallback.apis(tempSrcFile)
-    apis.groupBy(_.name).map(companions.tupled).toSet
+    IO.withTemporaryDirectory { temp =>
+      val (fileName, code) = src
+      val srcFile = new File(temp, fileName)
+      IO.write(srcFile, code)
+      val classesDir = new File(temp, "classes")
+      classesDir.mkdir()
+      JavaCompilerForUnitTesting.compileJava(Seq(srcFile), classesDir, Seq.empty)
+      // Loaded, since ClassToAPI reads classes reflectively. Zinc's own Java analysis no longer
+      // does — it reads class files (ClassfileToAPI) — so this calls ClassToAPI directly.
+      val loader = new java.net.URLClassLoader(Array(classesDir.toURI.toURL))
+      val classes = (sbt.io.PathFinder(classesDir) ** "*.class").get().map { f =>
+        val binaryName = IO.relativize(classesDir, f).get.stripSuffix(".class").replace('/', '.')
+        loader.loadClass(binaryName)
+      }
+      val (apis, _, _) = ClassToAPI.process(classes)
+      apis.toSet.groupBy(_.name).map(companions.tupled).toSet
+    }
 
   private def companions(className: String, classes: Set[ClassLike]): Companions =
     assert(classes.size <= 2, s"Too many classes named $className: $classes")
@@ -232,15 +244,4 @@ class ClassToAPISpecification extends UnitSpec:
       case c: ClassLikeDef if c.name == innerClassName && c.definitionType == defType => c
     })
 
-  def readAPI(
-      callback: AnalysisCallback,
-      source: VirtualFileRef,
-      classes: Seq[Class[?]]
-  ): Set[(String, String)] =
-    val (apis, mainClasses, inherits) = ClassToAPI.process(classes)
-    apis.foreach(callback.api(source, _))
-    mainClasses.foreach(callback.mainClass(source, _))
-    inherits.map {
-      case (from, to) => (from.getName, to.getName)
-    }
 end ClassToAPISpecification

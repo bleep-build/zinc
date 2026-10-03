@@ -36,7 +36,7 @@ object JavaCompilerForUnitTesting:
     override def input(): InputStream = Files.newInputStream(p)
 
   def extractDependenciesFromSrcs(srcs: (String, String)*): ExtractedClassDependencies =
-    val (_, testCallback) = compileJavaSrcs(srcs*)((_, _, classes) => extractParents(classes))
+    val (_, testCallback) = compileJavaSrcs(srcs*)((_, _, named, _) => extractParents(named))
 
     val memberRefDeps = testCallback.classDependencies
       .collect({
@@ -56,7 +56,12 @@ object JavaCompilerForUnitTesting:
     ExtractedClassDependencies.fromPairs(memberRefDeps, inheritanceDeps, localInheritanceDeps)
 
   def compileJavaSrcs(srcs: (String, String)*)(
-      readAPI: (AnalysisCallback, VirtualFileRef, Seq[Class[?]]) => Set[(String, String)]
+      readAPI: (
+          AnalysisCallback,
+          VirtualFileRef,
+          Seq[(String, ClassFile)],
+          ClassfileToAPIResolve
+      ) => Set[(String, String)]
   ): (Seq[VirtualFile], TestCallback) =
     IO.withTemporaryDirectory { temp =>
       val srcFiles0 = srcs.map {
@@ -84,7 +89,7 @@ object JavaCompilerForUnitTesting:
       // logger.setLevel(sbt.util.Level.Debug)
 
       // we pass extractParents as readAPI. In fact, Analyze expect readAPI to do both things:
-      // - extract api representation out of Class (and saved it via a side effect)
+      // - extract api representation out of the class files (and saved it via a side effect)
       // - extract all base classes.
       // we extract just parents as this is enough for testing
 
@@ -94,7 +99,7 @@ object JavaCompilerForUnitTesting:
       JavaAnalyze(classFiles, srcFiles, logger, output, finalJarOutput = None)(
         analysisCallback,
         classloader,
-        readAPI(analysisCallback, _, _)
+        readAPI(analysisCallback, _, _, _)
       )
       (srcFiles, analysisCallback)
     }
@@ -118,8 +123,12 @@ object JavaCompilerForUnitTesting:
   def analyze(
       classesDir: File,
       srcFiles: Seq[File],
-      readClassfileAPI: (AnalysisCallback, VirtualFileRef, Seq[(String, ClassFile)]) => Unit =
-        (_, _, _) => ()
+      readClassfileAPI: (
+          AnalysisCallback,
+          VirtualFileRef,
+          Seq[(String, ClassFile)],
+          ClassfileToAPIResolve
+      ) => Unit = (_, _, _, _) => ()
   ): TestCallback =
     val srcs: List[VirtualFile] = srcFiles.toList.map(f => new TestVirtualFile(f.toPath))
     val analysisCallback = new TestCallback
@@ -131,23 +140,27 @@ object JavaCompilerForUnitTesting:
     JavaAnalyze(classFiles, srcs, ConsoleLogger(), output, finalJarOutput = None)(
       analysisCallback,
       classloader,
-      (_, classes) => extractParents(classes),
-      readClassfileAPI(analysisCallback, _, _)
+      (source, named, resolve) =>
+        readClassfileAPI(analysisCallback, source, named, resolve)
+        extractParents(named)
     )
     analysisCallback
+  end analyze
 
   private def prepareSrcFile(baseDir: File, fileName: String, src: String): File =
     val srcFile = new File(baseDir, fileName)
     IO.write(srcFile, src)
     srcFile
 
-  private val extractParents: Seq[Class[?]] => Set[(String, String)] = classes =>
-    def canonicalNames(p: (Class[?], Class[?])): (String, String) =
-      p._1.getCanonicalName -> p._2.getCanonicalName
-    val parents =
-      classes
-        .map(c => c -> c.getSuperclass)
-        .filterNot(_._2 == null) // may be null for an interface
-    val parentInterfaces = classes.flatMap(c => c.getInterfaces.map(i => c -> i))
-    (parents ++ parentInterfaces).map(canonicalNames).toSet
+  /** Inheritance edges from the class files, as `AnalyzingJavaCompiler.readAPI` returns them. */
+  private val extractParents: Seq[(String, ClassFile)] => Set[(String, String)] = named =>
+    named.iterator.flatMap {
+      case (_, cf) =>
+        (cf.superClassName +: cf.interfaceNames.toIndexedSeq)
+          .filter(_.nonEmpty)
+          .map(cf.className -> _)
+    }.toSet
+
+  /** A supertype resolver, as `JavaAnalyze` hands `readAPI` one. */
+  type ClassfileToAPIResolve = String => Option[ClassFile]
 end JavaCompilerForUnitTesting

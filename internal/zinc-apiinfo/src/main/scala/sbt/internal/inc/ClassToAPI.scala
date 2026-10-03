@@ -67,10 +67,16 @@ object ClassToAPI:
       private[sbt] val mainClasses: mutable.Set[String],
       private[sbt] val log: Logger
   ):
+    // Each class's parsed classfile, read once per run. Every class looks at the classfiles of all
+    // its supertypes, so without this a supertype shared by many classes is re-read and re-parsed
+    // once per subclass.
+    private[sbt] val classFiles: mutable.Map[Class[?], ClassFile] = new mutable.HashMap
+
     def clear(): Unit =
       memo.clear()
       inherited.clear()
       lz.clear()
+      classFiles.clear()
   def emptyClassMap(log: Logger = Logger.Null): ClassMap =
     new ClassMap(
       new mutable.HashMap,
@@ -183,7 +189,7 @@ object ClassToAPI:
       enclPkg: Option[String],
       cmap: ClassMap
   ): (api.Structure, api.Structure) =
-    lazy val cf = classFileForClass(c)
+    lazy val cf = classFileFor(c, cmap)
     val methods = mergeMap(
       c,
       c.getDeclaredMethods.toIndexedSeq,
@@ -235,7 +241,7 @@ object ClassToAPI:
     // inherited public inner classes from parent classfiles
     for
       parent <- allSuperTypes(c).collect { case c: Class[?] => c }
-      parentCf = classFileForClass(parent)
+      parentCf = classFileFor(parent, cmap)
       info <- parentCf.innerClasses if info.outerClassName == parent.getName && info.isPublic
     do
       loadInnerClass(cl, info, cmap.log).foreach(inheritedClasses += _)
@@ -267,6 +273,9 @@ object ClassToAPI:
       case e: (ClassNotFoundException | NoClassDefFoundError | IllegalAccessError) =>
         log.warn(s"Could not load inner class ${info.innerClassName}: $e")
         None
+
+  private def classFileFor(c: Class[?], cmap: ClassMap): ClassFile =
+    cmap.classFiles.getOrElseUpdate(c, classFileForClass(c))
 
   /** TODO: over time, ClassToAPI should switch the majority of access to the classfile parser */
   private def classFileForClass(c: Class[?]): ClassFile =
