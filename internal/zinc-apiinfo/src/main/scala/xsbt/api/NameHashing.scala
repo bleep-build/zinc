@@ -11,6 +11,8 @@
 
 package xsbt.api
 
+import scala.collection.mutable
+
 import xsbti.UseScope
 import xsbti.api.Definition
 import xsbti.api.DefinitionType
@@ -58,7 +60,10 @@ class NameHashing(optimizedSealed: Boolean):
       useScope: UseScope
   ): Array[NameHash] =
     val includeSealedChildren = !optimizedSealed || useScope == UseScope.PatMatTarget
-    val groupedBySimpleName = defs.groupBy(locatedDef => localName(locatedDef.name))
+    val groupedBySimpleName = mutable.HashMap.empty[String, mutable.ArrayBuffer[Definition]]
+    defs.foreach { d =>
+      groupedBySimpleName.getOrElseUpdate(localName(d.name), mutable.ArrayBuffer.empty) += d
+    }
     groupedBySimpleName.iterator.map {
       case (name, value) =>
         NameHash.of(name, useScope, hashLocatedDefinitions(value, location, includeSealedChildren))
