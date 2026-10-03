@@ -269,6 +269,25 @@ class ClassfileToAPISpecification extends UnitSpec:
     }
   }
 
+  // An annotation processor or nullness checker on a dependent reads annotation element values and
+  // parameter annotations, so both are public shape.
+  it should "detect annotation element value and parameter annotation changes" in {
+    IO.withTemporaryDirectory { temp =>
+      def method(dirName: String, signature: String) =
+        sampleApis(temp, dirName, s"public class Sample { $signature {} }")
+      val since1 = method("a", "@Deprecated(since = \"1\") public void run()")
+      val since2 = method("b", "@Deprecated(since = \"2\") public void run()")
+      val since1Again = method("c", "@Deprecated(since = \"1\") public void run()")
+      assert(hashAll(since1) != hashAll(since2))
+      assert(hashAll(since1) == hashAll(since1Again))
+
+      val plain = method("d", "public void run(String a, String b)")
+      val first = method("e", "public void run(@Deprecated String a, String b)")
+      val second = method("f", "public void run(String a, @Deprecated String b)")
+      assert(Set(hashAll(plain), hashAll(first), hashAll(second)).size == 3)
+    }
+  }
+
   // P3: only a method actually named `main` (not just any public-static-void(String[])) is a main.
   it should "treat only a method named main as a main class" in {
     IO.withTemporaryDirectory { temp =>
