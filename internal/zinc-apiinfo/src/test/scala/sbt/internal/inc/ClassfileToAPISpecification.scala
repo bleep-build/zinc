@@ -225,6 +225,16 @@ class ClassfileToAPISpecification extends UnitSpec:
     }
   }
 
+  // A varargs method and its array twin share a descriptor; only ACC_VARARGS tells them apart, and
+  // only the varargs one accepts `run("a", "b")`.
+  it should "detect a method gaining or losing varargs" in {
+    IO.withTemporaryDirectory { temp =>
+      val varargs = sampleApis(temp, "a", "public class Sample { public void run(String... a) {} }")
+      val array = sampleApis(temp, "b", "public class Sample { public void run(String[] a) {} }")
+      assert(hashAll(varargs) != hashAll(array))
+    }
+  }
+
   // P3: only a method actually named `main` (not just any public-static-void(String[])) is a main.
   it should "treat only a method named main as a main class" in {
     IO.withTemporaryDirectory { temp =>

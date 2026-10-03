@@ -378,9 +378,15 @@ object ClassfileToAPI:
       enclPkg: Option[String]
   ): (Boolean, api.ClassDefinition) =
     val (paramTypes, returnType) = parseMethodType(m.descriptor.getOrElse("()V"))
-    val params = paramTypes.map(t =>
-      api.MethodParameter.of("", t, false, api.ParameterModifier.Plain)
-    )
+    // `m(String... a)` and `m(String[] a)` share a descriptor, but only the first accepts
+    // `m("a", "b")`. Mark the varargs parameter as ClassToAPI.defLike does.
+    val varArgPosition = if (m.accessFlags & AccVarargs) != 0 then paramTypes.length - 1 else -1
+    val params = paramTypes.zipWithIndex.map { (t, i) =>
+      val modifier =
+        if i == varArgPosition then api.ParameterModifier.Repeated
+        else api.ParameterModifier.Plain
+      api.MethodParameter.of("", t, false, modifier)
+    }
     val paramList = api.ParameterList.of(params, false)
     // Match ClassToAPI.uniqueConstructorName, which uses the binary (not canonical) class name.
     val name =
@@ -396,6 +402,9 @@ object ClassfileToAPI:
     val d = api.Def.of(name, acc, mods, annots, noTypeParameters, Array(paramList), returnType)
     (m.isStatic, d)
   end methodDef
+
+  /** ACC_VARARGS (JVMS 4.6); java.lang.reflect.Modifier keeps its equivalent private. */
+  private final val AccVarargs = 0x0080
 
   private val ObjectRef = ClassToAPI.reference("java.lang.Object")
 
